@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+data/bmecat/*.xml
+dist/
+
+# private notes
+docs/
+.DS_Store

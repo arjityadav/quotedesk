@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- An XML External Entity (XXE) attack. A naive parser would paste the contents of
+     /etc/passwd into the product name. Your parser must refuse the whole file. -->
+<!DOCTYPE BMECAT [
+  <!ENTITY secret SYSTEM "file:///etc/passwd">
+]>
+<BMECAT version="2005">
+  <T_NEW_CATALOG>
+    <PRODUCT mode="new">
+      <SUPPLIER_PID>MH-900001</SUPPLIER_PID>
+      <PRODUCT_DETAILS>
+        <DESCRIPTION_SHORT lang="deu">&secret;</DESCRIPTION_SHORT>
+      </PRODUCT_DETAILS>
+    </PRODUCT>
+  </T_NEW_CATALOG>
+</BMECAT>
