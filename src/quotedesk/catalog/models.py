@@ -8,6 +8,7 @@ Products, and later modules match customer requests against them.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated
@@ -86,9 +87,52 @@ class Product(BaseModel):
     @model_validator(mode="after")
     def check_rules(self) -> Product:
         """Per-product rules: SKU format, required attributes, IP rating, successor."""
+        if not SKU_PATTERN.fullmatch(self.sku):
+            raise ValueError(f"sku {self.sku!r} must look like MH-123456")
+
+        required = REQUIRED_ATTRIBUTES[self.category]
+        missing = required - self.attributes.keys()
+        if missing:
+            names = ", ".join(sorted(missing))
+            raise ValueError(f"{self.category} {self.sku} is missing required attributes: {names}")
+
+        if "ip_rating" in self.attributes:
+            ip = self.attributes["ip_rating"]
+            if not isinstance(ip, str) or not IP_PATTERN.fullmatch(ip):
+                raise ValueError(f"{self.sku}: invalid ip_rating {ip!r}, expected e.g. 'IP65'")
+
+        if self.successor_sku is not None:
+            if not self.discontinued:
+                raise ValueError(
+                    f"{self.sku}: successor_sku is only allowed on a discontinued product"
+                )
+            if self.successor_sku == self.sku:
+                raise ValueError(f"{self.sku}: a product cannot be its own successor (itself)")
+
         return self
 
 
 def validate_catalog(products: list[Product]) -> list[str]:
     """Check rules that need the whole catalog. Return a list of problems (empty = valid)."""
-    raise NotImplementedError
+    problems: list[str] = []
+
+    counts = Counter(p.sku for p in products)
+    for sku in sorted(s for s, n in counts.items() if n > 1):
+        problems.append(f"duplicate sku {sku} ({counts[sku]} times)")
+
+    by_sku = {p.sku: p for p in products}
+    for p in products:
+        if p.successor_sku is None:
+            continue
+        successor = by_sku.get(p.successor_sku)
+        if successor is None:
+            problems.append(f"{p.sku}: successor {p.successor_sku} is not in the catalog")
+        elif successor.discontinued:
+            problems.append(f"{p.sku}: successor {successor.sku} is itself discontinued")
+        elif successor.category != p.category:
+            problems.append(
+                f"{p.sku}: successor {successor.sku} is in a different category "
+                f"({successor.category}, expected {p.category})"
+            )
+
+    return problems
