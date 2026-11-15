@@ -7,15 +7,15 @@ break the rules. The parser must survive all of that and report what it skipped.
 
 from __future__ import annotations
 
+import re
 from datetime import date
-from decimal import Decimal, InvalidOperation  # noqa: F401
+from decimal import Decimal
 
 from lxml import etree
 from pydantic import BaseModel, ValidationError
 
-from quotedesk.catalog.models import (  # noqa: F401
+from quotedesk.catalog.models import (
     AttrValue,
-    Category,
     Product,
     Unit,
     validate_catalog,
@@ -137,24 +137,143 @@ def to_bmecat(
 # --------------------------------------------------------------------------- parser
 
 
+# Plain decimal with one optional separator. A whitelist instead of trusting Decimal(),
+# which would also accept "NaN", "Infinity", "1e3" and "1_000".
+_NUMBER = re.compile(r"^[+-]?\d+(?:[.,]\d+)?$")
+
+
 def parse_decimal(text: str | None) -> Decimal:
     """Parse a supplier number (German decimal comma allowed)."""
-    raise NotImplementedError
+    if text is None:
+        raise ValueError("number is missing")
+    cleaned = text.strip()
+    if not _NUMBER.fullmatch(cleaned):
+        # Also rejects "1.234,50": guessing thousands separators silently changes prices.
+        raise ValueError(f"not a plain decimal number: {text!r}")
+    return Decimal(cleaned.replace(",", "."))
 
 
 def parse_feature_value(text: str | None) -> AttrValue:
     """FVALUE -> Decimal if it is a number, else the stripped text."""
-    raise NotImplementedError
+    if text is None or not text.strip():
+        raise ValueError("feature value is empty")
+    try:
+        return parse_decimal(text)
+    except ValueError:
+        return text.strip()
 
 
 def parse_unit(text: str | None) -> Unit:
     """Map a unit code or alias to Unit, case-insensitive."""
-    raise NotImplementedError
+    if text is None or not text.strip():
+        raise ValueError("order unit is missing")
+    unit = UNIT_ALIASES.get(text.strip().upper())
+    if unit is None:
+        raise ValueError(f"unknown order unit {text.strip()!r}")
+    return unit
 
 
 def parse_bmecat(data: bytes) -> ParseResult:
     """Parse BMEcat XML into Products, collecting per-product issues instead of failing."""
-    raise NotImplementedError
+    root = _parse_xml(data)
+
+    products: list[Product] = []
+    issues: list[ParseIssue] = []
+    for position, prod in enumerate(root.iterfind("{*}T_NEW_CATALOG/{*}PRODUCT"), start=1):
+        try:
+            products.append(_parse_product(prod))
+        except ValueError as e:  # pydantic's ValidationError is a ValueError too
+            message = _short(e) if isinstance(e, ValidationError) else str(e)
+            sku = _text(prod, "{*}SUPPLIER_PID")
+            issues.append(ParseIssue(position=position, sku=sku, message=message))
+
+    for problem in validate_catalog(products):
+        issues.append(ParseIssue(position=None, sku=None, message=problem))
+
+    return ParseResult(products=products, issues=issues)
+
+
+def _parse_xml(data: bytes) -> etree._Element:
+    """Parse untrusted XML safely and check it is a BMEcat document."""
+    parser = etree.XMLParser(
+        resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False
+    )
+    try:
+        root = etree.fromstring(data, parser)
+    except etree.XMLSyntaxError as e:
+        raise BMEcatError(f"not well-formed XML: {e}") from e
+    if root is None:
+        raise BMEcatError("empty document")
+    # A DOCTYPE is how XXE and entity-expansion ("billion laughs") attacks get in.
+    # BMEcat never needs one, so refuse the whole file.
+    if root.getroottree().docinfo.doctype:
+        raise BMEcatError("DOCTYPE declarations are not allowed")
+    if etree.QName(root).localname != "BMECAT":
+        raise BMEcatError(f"root element is {etree.QName(root).localname}, expected BMECAT")
+    return root
+
+
+def _parse_product(prod: etree._Element) -> Product:
+    """One PRODUCT element -> Product. Raises ValueError on any problem."""
+    name_de: str | None = None
+    name_en: str | None = None
+    for desc in prod.iterfind("{*}PRODUCT_DETAILS/{*}DESCRIPTION_SHORT"):
+        text = (desc.text or "").strip()
+        lang = (desc.get("lang") or "").strip().lower()
+        if not lang or lang in LANG_DE:  # no lang attribute means German
+            name_de = name_de or text
+        elif lang in LANG_EN:
+            name_en = name_en or text
+
+    attributes: dict[str, AttrValue] = {}
+    for feature in prod.iterfind("{*}PRODUCT_FEATURES/{*}FEATURE"):
+        fname = _text(feature, "{*}FNAME")
+        if not fname:
+            raise ValueError("FEATURE without FNAME")
+        try:
+            attributes[fname] = parse_feature_value(_text(feature, "{*}FVALUE"))
+        except ValueError as e:
+            raise ValueError(f"feature {fname}: {e}") from e
+
+    raw_pack = _text(prod, "{*}PRODUCT_ORDER_DETAILS/{*}QUANTITY_INTERVAL")
+    pack = parse_decimal(raw_pack) if raw_pack is not None else Decimal(1)
+    if pack != pack.to_integral_value():
+        raise ValueError(f"pack size must be a whole number, got {raw_pack!r}")
+
+    list_price = None
+    for price in prod.iterfind("{*}PRODUCT_PRICE_DETAILS/{*}PRODUCT_PRICE"):
+        if price.get("price_type") == "net_list":
+            list_price = parse_decimal(_text(price, "{*}PRICE_AMOUNT"))
+            break
+    if list_price is None:
+        raise ValueError("no net_list price")
+
+    discontinued = any(
+        status.get("type") == "old_product" for status in prod.iterfind(".//{*}PRODUCT_STATUS")
+    )
+    successor_sku = None
+    for ref in prod.iterfind("{*}PRODUCT_REFERENCE"):
+        if ref.get("type") == "followup":
+            successor_sku = _text(ref, "{*}PROD_ID_TO")
+            break
+
+    # model_validate runs every field and model rule, exactly like Product(...).
+    return Product.model_validate(
+        {
+            "sku": _text(prod, "{*}SUPPLIER_PID"),
+            "name_de": name_de,
+            "name_en": name_en or name_de,
+            "category": _text(prod, "{*}PRODUCT_FEATURES/{*}REFERENCE_FEATURE_GROUP_ID"),
+            "manufacturer": _text(prod, "{*}PRODUCT_DETAILS/{*}MANUFACTURER_NAME"),
+            "mpn": _text(prod, "{*}PRODUCT_DETAILS/{*}MANUFACTURER_PID"),
+            "unit": parse_unit(_text(prod, "{*}PRODUCT_ORDER_DETAILS/{*}ORDER_UNIT")),
+            "pack_size": int(pack),
+            "list_price": list_price,
+            "attributes": attributes,
+            "discontinued": discontinued,
+            "successor_sku": successor_sku,
+        }
+    )
 
 
 def _text(el: etree._Element, path: str) -> str | None:
