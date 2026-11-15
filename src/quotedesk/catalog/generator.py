@@ -15,12 +15,14 @@ CENT = Decimal("0.01")
 
 def round_price(value: Decimal) -> Decimal:
     """Round to cents, half up (commercial rounding), never below 0.01."""
-    raise NotImplementedError
+    return max(value.quantize(CENT, rounding=ROUND_HALF_UP), CENT)
 
 
 def expand_family(family: Family) -> list[dict[str, object]]:
     """All option combinations of a family, in axis order, as dicts."""
-    raise NotImplementedError
+    names = list(family.axes)
+    combos = itertools.product(*family.axes.values())
+    return [dict(zip(names, combo, strict=True)) for combo in combos]
 
 
 def generate_catalog(seed: int = 42, discontinue_rate: float = 0.03) -> list[Product]:
