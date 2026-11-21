@@ -407,6 +407,7 @@ def render_line(
     manufacturer: bool = False,
     ring: bool = False,
     mpn: bool = False,
+    history: str | None = None,
 ) -> RenderedLine:
     """Render one line item.
 
@@ -415,6 +416,7 @@ def render_line(
     manufacturer: name the manufacturer
     ring:         state the ring length as "2 Ringe à 100 m" (cables only)
     mpn:          ask by manufacturer part number instead of describing the item
+    history:      refer to a past order instead of a quantity, e.g. "wie letztes Mal"
     """
     if quantity <= 0:
         raise ValueError("quantity must be positive")
@@ -449,7 +451,17 @@ def render_line(
                 ]
             )
 
-    quote = _with_quantity(desc, quantity, product.unit, product.pack_size, ring, ctx)
+    if history is not None:
+        ctx.tags.add("from_history")
+        quote = ctx.choose(
+            [
+                (f"{desc}, Menge {history}", None),
+                (f"nochmal {desc} {history}", None),
+                (f"{desc} – gleiche Menge {history}", None),
+            ]
+        )
+    else:
+        quote = _with_quantity(desc, quantity, product.unit, product.pack_size, ring, ctx)
     text = quote
     if messy and rng.random() < MESSY_REMARK:
         text = f"{quote} {rng.choice(REMARKS)}"
