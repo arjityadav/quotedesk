@@ -4,16 +4,17 @@
 
 Built for **Musterhandel GmbH**, a fictional electrical and HVAC wholesaler. **All data is synthetic**: no real customers, catalogs or personal data. That keeps the project clean under GDPR, copyright and database law, and it means every request has a known correct answer to score against.
 
-> Status: early development. The product catalog, BMEcat import/export and the database schema are in progress. See the [roadmap](#10-roadmap).
+> Status: early development. Data foundations are in place: synthetic catalog, BMEcat import/export, customers with contract prices, and the Postgres schema with migrations. See the [roadmap](#10-roadmap).
 
 ## Quick start
 
 ```bash
 uv sync
+cp .env.example .env     # local settings; add API keys later
 make db-up               # PostgreSQL 16 + pgvector in Docker
+make migrate             # apply database migrations (Alembic)
 make check               # lint + types + tests
-make test-db             # database tests
-make seed                # generate the catalog and load it
+make seed                # generate catalog + customers, migrate, load
 ```
 
 Current layout:
@@ -21,9 +22,10 @@ Current layout:
 ```text
 src/quotedesk/
   catalog/     product model, families, generator, BMEcat reader/writer
-  db/          schema and loader
+  customers/   customers, discount tiers, contract price lists
+  db/          SQL schema files, Alembic migrations, loader
   cli.py       `quotedesk generate | seed`
-tests/         unit tests (catalog/, db/)
+tests/         unit tests (catalog/, customers/, db/)
 deploy/compose local PostgreSQL
 ```
 

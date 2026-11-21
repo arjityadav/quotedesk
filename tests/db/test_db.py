@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import os
-import uuid
-from collections.abc import Iterator
 from decimal import Decimal
 from typing import Any
 
 import pytest
 
-from quotedesk.catalog.generator import generate_catalog
 from quotedesk.catalog.models import Product
 from quotedesk.db.loader import apply_schema, attributes_json, load_products
 
@@ -34,26 +30,7 @@ def test_attributes_json(attrs: dict[str, Any], expected: str) -> None:
     assert attributes_json(attrs) == expected
 
 
-@pytest.fixture
-def conn() -> Iterator[Any]:
-    url = os.environ.get("DATABASE_URL")
-    if not url:
-        pytest.skip("DATABASE_URL not set (run `make db-up`, then `make test-db`)")
-    psycopg = pytest.importorskip("psycopg")
-    schema = f"test_{uuid.uuid4().hex[:8]}"
-    with psycopg.connect(url, autocommit=True) as c:
-        c.execute(f"CREATE SCHEMA {schema}")
-        c.execute(f"SET search_path TO {schema}")
-        apply_schema(c)
-        try:
-            yield c
-        finally:
-            c.execute(f"DROP SCHEMA {schema} CASCADE")
-
-
-@pytest.fixture(scope="module")
-def catalog() -> list[Product]:
-    return generate_catalog(seed=42)
+# The `conn` (fresh schema per test) and `catalog` fixtures live in conftest.py.
 
 
 def count(conn: Any) -> int:

@@ -1,4 +1,9 @@
-.PHONY: install check lint fmt type test test-db db-up db-down seed clean
+-include .env
+export
+
+DATABASE_URL ?= postgresql://quotedesk:quotedesk@localhost:5432/quotedesk
+
+.PHONY: install check lint fmt type test test-db db-up db-down migrate seed clean
 
 install:
 	uv sync
@@ -25,10 +30,13 @@ db-down:
 	docker compose -f deploy/compose/compose.yaml down
 
 test-db:
-	DATABASE_URL=postgresql://quotedesk:quotedesk@localhost:5432/quotedesk uv run pytest -m db
+	uv run pytest -m db
+
+migrate:
+	uv run alembic upgrade head
 
 seed:
-	DATABASE_URL=postgresql://quotedesk:quotedesk@localhost:5432/quotedesk uv run quotedesk seed
+	uv run quotedesk seed
 
 clean:
 	rm -rf .pytest_cache .mypy_cache .ruff_cache data/bmecat/*.xml

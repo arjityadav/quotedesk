@@ -11,3 +11,4 @@ dist/
 # private notes
 docs/
 .DS_Store
+CLAUDE.md

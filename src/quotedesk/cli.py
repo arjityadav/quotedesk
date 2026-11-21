@@ -1,7 +1,7 @@
 """Command line entry point.
 
 quotedesk generate --seed 42 --out data/bmecat/catalog.xml
-quotedesk seed --seed 42          # generate -> BMEcat -> parse -> load into Postgres
+quotedesk seed --seed 42          # generate -> BMEcat -> parse -> migrate -> load into Postgres
 """
 
 from __future__ import annotations
@@ -26,9 +26,14 @@ def _generate(seed: int, out: Path) -> Path:
 
 
 def _seed(seed: int, out: Path) -> int:
-    import psycopg  # imported here so `generate` works without a database driver
+    # Imported here so `generate` works without a database driver.
+    import psycopg
 
-    from quotedesk.db.loader import apply_schema, load_products
+    from quotedesk.customers.generator import generate_customers
+    from quotedesk.customers.models import validate_customers
+    from quotedesk.customers.orders import generate_orders, validate_orders
+    from quotedesk.db.loader import load_customers, load_orders, load_products
+    from quotedesk.db.migrate import upgrade
 
     path = _generate(seed, out)
     result = parse_bmecat(path.read_bytes())  # load via the parser: same path as a supplier file
@@ -37,15 +42,25 @@ def _seed(seed: int, out: Path) -> int:
     if result.issues:
         return 1
 
+    customers, prices = generate_customers(result.products, seed=seed)
+    orders = generate_orders(result.products, customers, prices, seed=seed)
+    problems = validate_customers(customers, prices, result.products)
+    problems += validate_orders(orders, customers, result.products)
+    for problem in problems:
+        print(f"issue: {problem}", file=sys.stderr)
+    if problems:
+        return 1
+
     url = os.environ.get("DATABASE_URL")
     if not url:
         print("DATABASE_URL is not set", file=sys.stderr)
         return 2
+    upgrade(url)  # bring the schema to the latest migration first
     with psycopg.connect(url) as conn:
-        apply_schema(conn)
-        conn.commit()
         n = load_products(conn, result.products)
-    print(f"loaded {n} products")
+        c = load_customers(conn, customers, prices)
+        o = load_orders(conn, orders)
+    print(f"loaded {n} products, {c} customers, {len(prices)} contract prices, {o} orders")
     return 0
 
 

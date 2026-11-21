@@ -1,22 +1,27 @@
-"""Load catalog products into PostgreSQL."""
+"""Load catalog products, customers, price lists and order history into PostgreSQL."""
 
 from __future__ import annotations
 
 import json
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 
 import psycopg
 
 from quotedesk.catalog.models import AttrValue, Product
-
-SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+from quotedesk.customers.models import Customer, PriceListEntry
+from quotedesk.customers.orders import Order
+from quotedesk.db.migrate import sql_files
 
 
 def apply_schema(conn: psycopg.Connection[Any]) -> None:
-    """Create tables and indexes (idempotent)."""
-    conn.execute(SCHEMA_PATH.read_text(encoding="utf-8"))
+    """Run every schema file in order (idempotent). For tests and throwaway schemas.
+
+    Real databases use Alembic (`make migrate`), which runs the same files and records
+    the version.
+    """
+    for path in sql_files():
+        conn.execute(path.read_text(encoding="utf-8"))
 
 
 def attributes_json(attributes: dict[str, AttrValue]) -> str:
@@ -92,3 +97,84 @@ def load_products(conn: psycopg.Connection[Any], products: list[Product]) -> int
     with conn.transaction(), conn.cursor() as cur:
         cur.executemany(UPSERT_SQL, rows)
     return len(rows)
+
+
+_CUSTOMER_COLUMNS = (
+    "id",
+    "name",
+    "kind",
+    "city",
+    "postcode",
+    "discount_tier",
+    "delivery",
+    "price_list_id",
+)
+_CUSTOMER_UPDATED = [c for c in _CUSTOMER_COLUMNS if c != "id"]
+
+UPSERT_CUSTOMER_SQL = f"""
+INSERT INTO customers ({", ".join(_CUSTOMER_COLUMNS)})
+VALUES ({", ".join(f"%({c})s" for c in _CUSTOMER_COLUMNS)})
+ON CONFLICT (id) DO UPDATE SET
+    {", ".join(f"{c} = EXCLUDED.{c}" for c in _CUSTOMER_UPDATED)},
+    updated_at = now()
+WHERE ({", ".join(f"customers.{c}" for c in _CUSTOMER_UPDATED)})
+    IS DISTINCT FROM ({", ".join(f"EXCLUDED.{c}" for c in _CUSTOMER_UPDATED)})
+"""
+
+
+def load_customers(
+    conn: psycopg.Connection[Any], customers: list[Customer], entries: list[PriceListEntry]
+) -> int:
+    """Upsert customers and replace their price lists in ONE transaction.
+
+    Price lists are replaced, not merged: a SKU dropped from a contract must lose its
+    contract price. Returns how many customers were sent.
+    """
+    list_ids = sorted(
+        {c.price_list_id for c in customers if c.price_list_id} | {e.price_list_id for e in entries}
+    )
+    customer_rows = [
+        {**c.model_dump(include=set(_CUSTOMER_COLUMNS)), "kind": c.kind.value,
+         "discount_tier": c.discount_tier.value, "delivery": c.delivery.value}
+        for c in customers
+    ]  # fmt: skip
+    price_rows = [e.model_dump() for e in entries]
+
+    with conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO price_lists (id) VALUES (%s) ON CONFLICT (id) DO NOTHING",
+            [(i,) for i in list_ids],
+        )
+        cur.executemany(UPSERT_CUSTOMER_SQL, customer_rows)
+        cur.execute("DELETE FROM prices WHERE price_list_id = ANY(%s)", (list_ids,))
+        cur.executemany(
+            "INSERT INTO prices (price_list_id, sku, min_qty, unit_price)"
+            " VALUES (%(price_list_id)s, %(sku)s, %(min_qty)s, %(unit_price)s)",
+            price_rows,
+        )
+    return len(customer_rows)
+
+
+def load_orders(conn: psycopg.Connection[Any], orders: list[Order]) -> int:
+    """Upsert orders and replace their lines in ONE transaction; return orders sent."""
+    order_rows = [
+        {"id": o.id, "customer_id": o.customer_id, "order_date": o.order_date} for o in orders
+    ]
+    line_rows = [{"order_id": o.id, **line.model_dump()} for o in orders for line in o.lines]
+    with conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO orders (id, customer_id, order_date)"
+            " VALUES (%(id)s, %(customer_id)s, %(order_date)s)"
+            " ON CONFLICT (id) DO UPDATE SET"
+            " customer_id = EXCLUDED.customer_id, order_date = EXCLUDED.order_date"
+            " WHERE (orders.customer_id, orders.order_date)"
+            " IS DISTINCT FROM (EXCLUDED.customer_id, EXCLUDED.order_date)",
+            order_rows,
+        )
+        cur.execute("DELETE FROM order_lines WHERE order_id = ANY(%s)", ([o.id for o in orders],))
+        cur.executemany(
+            "INSERT INTO order_lines (order_id, line_no, sku, quantity, unit_price)"
+            " VALUES (%(order_id)s, %(line_no)s, %(sku)s, %(quantity)s, %(unit_price)s)",
+            line_rows,
+        )
+    return len(order_rows)

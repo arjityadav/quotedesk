@@ -1,4 +1,4 @@
--- QuoteDesk schema: the product catalog.
+-- 0001: the product catalog.
 -- Re-runnable: every statement uses IF NOT EXISTS.
 
 CREATE TABLE IF NOT EXISTS products (
