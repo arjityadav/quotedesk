@@ -77,6 +77,7 @@ class PlannedRfq:
     label: Label
     customer: Customer
     lines: tuple[RenderedLine, ...]  # same order as label.lines
+    categories: tuple[Category, ...]  # category of each line's product, same order
 
 
 def rfq_rng(seed: int, rfq_id: str) -> random.Random:
@@ -110,6 +111,7 @@ class _World:
 class _Planned:
     line: LabelLine
     rendered: RenderedLine
+    category: Category
 
 
 def _quantity(p: Product, rng: random.Random, tender: bool, ring: bool) -> Decimal:
@@ -150,7 +152,7 @@ def _line(
         expected_route=Route.AUTO,
         tags=tuple(tags),
     )
-    return _Planned(line, rendered)
+    return _Planned(line, rendered, product.category)
 
 
 def _plain_line(
@@ -160,10 +162,17 @@ def _plain_line(
     optional = OPTIONAL_SPECS.get(product.category, frozenset())
     omit = [k for k in sorted(optional) if messy and rng.random() < P_OMIT_OPTIONAL]
     manufacturer = messy and rng.random() < P_MANUFACTURER
-    ring = product.unit is Unit.METRE and rng.random() < P_RING
+    ring = not tender and product.unit is Unit.METRE and rng.random() < P_RING
     quantity = _quantity(product, rng, tender, ring)
     rendered = render_line(
-        product, quantity, rng, messy=messy, omit=omit, manufacturer=manufacturer, ring=ring
+        product,
+        quantity,
+        rng,
+        messy=messy,
+        omit=omit,
+        manufacturer=manufacturer,
+        ring=ring,
+        tender=tender,
     )
     spec = spec_of(product, omit, manufacturer=manufacturer, pack_size=ring)
     return _line(product, quantity, rendered, acceptable_skus(world.catalog, spec), world)
@@ -284,7 +293,12 @@ def plan_rfq(
         tags=tuple(sorted(tags)),
         notes=_notes(lines),
     )
-    return PlannedRfq(label=label, customer=who, lines=tuple(p.rendered for p in planned))
+    return PlannedRfq(
+        label=label,
+        customer=who,
+        lines=tuple(p.rendered for p in planned),
+        categories=tuple(p.category for p in planned),
+    )
 
 
 def _notes(lines: Sequence[LabelLine]) -> str:

@@ -394,6 +394,14 @@ def _with_quantity(desc: str, q: Decimal, unit: Unit, pack: int, ring: bool, ctx
     )
 
 
+TENDER_UNIT = {Unit.PIECE: "St", Unit.METRE: "m", Unit.PACK: "Pck"}
+
+
+def tender_quantity(q: Decimal) -> str:
+    """Tender style: three decimals, German separators. 1200 -> '1.200,000'."""
+    return f"{q:,.3f}".replace(",", "_").replace(".", ",").replace("_", ".")
+
+
 # --- the entry point ------------------------------------------------------------------
 
 
@@ -408,6 +416,7 @@ def render_line(
     ring: bool = False,
     mpn: bool = False,
     history: str | None = None,
+    tender: bool = False,
 ) -> RenderedLine:
     """Render one line item.
 
@@ -417,6 +426,7 @@ def render_line(
     ring:         state the ring length as "2 Ringe à 100 m" (cables only)
     mpn:          ask by manufacturer part number instead of describing the item
     history:      refer to a past order instead of a quantity, e.g. "wie letztes Mal"
+    tender:       tender position: "20,000 St Kurztext", quantity with three decimals
     """
     if quantity <= 0:
         raise ValueError("quantity must be positive")
@@ -451,7 +461,9 @@ def render_line(
                 ]
             )
 
-    if history is not None:
+    if tender:
+        quote = f"{tender_quantity(quantity)} {TENDER_UNIT[product.unit]} {desc}"
+    elif history is not None:
         ctx.tags.add("from_history")
         quote = ctx.choose(
             [

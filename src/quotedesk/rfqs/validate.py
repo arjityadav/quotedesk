@@ -65,12 +65,22 @@ ANONYMOUS_OK = frozenset({RfqType.NON_RFQ, RfqType.ADVERSARIAL})
 
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
 _THOUSANDS = re.compile(r"^\d{1,3}(?:\.\d{3})+$")  # 1.000 / 12.500 in German
+_GERMAN_FULL = re.compile(r"^\d{1,3}(?:\.\d{3})+,\d+$")  # 1.200,000 in a tender
+_SPACE = re.compile(r"\s+")
+
+
+def squash(text: str) -> str:
+    """Collapse whitespace runs. PDF text layers break lines wherever a cell wraps."""
+    return _SPACE.sub(" ", text).strip()
 
 
 def quote_numbers(quote: str) -> set[Decimal]:
-    """All numbers in a quote. "1,5" and "1.5" both read as 1.5; "1.000" also as 1000."""
+    """All numbers in a quote. "1,5" and "1.5" both read as 1.5; "1.000" also as 1000;
+    "1.200,000" (a tender quantity) as 1200."""
     numbers: set[Decimal] = set()
     for raw in _NUMBER.findall(quote):
+        if _GERMAN_FULL.fullmatch(raw):
+            numbers.add(Decimal(raw.replace(".", "").replace(",", ".")))
         if _THOUSANDS.fullmatch(raw):
             numbers.add(Decimal(raw.replace(".", "")))
         if raw.count(".") + raw.count(",") <= 1:
@@ -134,10 +144,14 @@ def _check_customer(label: Label, customer_ids: set[str]) -> list[str]:
 
 
 def _check_quotes_in_text(label: Label, text: str) -> list[str]:
-    """Every quote occurs exactly once, and no quote hides inside another."""
+    """Every quote occurs exactly once, and no quote hides inside another.
+
+    Whitespace is compared loosely, so a quote that wraps inside a PDF table cell still counts.
+    """
     rid = label.rfq_id
     problems: list[str] = []
-    quotes = [line.source_quote for line in label.lines]
+    text = squash(text)
+    quotes = [squash(line.source_quote) for line in label.lines]
     for q in quotes:
         count = text.count(q)
         if count == 0:
